@@ -1,89 +1,47 @@
 # app/keys.py
-from __future__ import annotations
-import threading
 import time
-import hashlib
-import binascii
-from typing import Optional, List
-from dataclasses import dataclass
+import uuid
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
 
-@dataclass
-class KeyEntry:
-    private_key: rsa.RSAPrivateKey
-    kid: str
-    expiry: float  # epoch seconds
-
-    def public_numbers(self):
-        return self.private_key.public_key().public_numbers()
+class Key:
+    def __init__(self, private_key, public_key, expiry):
+        self.private_key = private_key
+        self.public_key = public_key
+        self.expiry = expiry
+        self.kid = str(uuid.uuid4())
 
 class KeyStore:
-    """
-    In-memory key store with basic functions:
-    - generate RSA key with expiry
-    - get newest unexpired / expired key
-    - list unexpired public keys
-    - lookup by kid
-    """
     def __init__(self):
-        self._lock = threading.RLock()
-        self._keys: List[KeyEntry] = []
+        self.keys = []
 
-    def generate_key(self, bits: int, expiry_epoch: float) -> KeyEntry:
-        if bits < 1024:
-            raise ValueError("bits must be >= 1024")
-        pk = rsa.generate_private_key(public_exponent=65537, key_size=bits)
-        # kid generated from SHA1 of modulus+exp, hex truncated
-        pub = pk.public_key().public_numbers()
-        m_bytes = pub.n.to_bytes((pub.n.bit_length() + 7) // 8, "big")
-        e_bytes = pub.e.to_bytes((pub.e.bit_length() + 7) // 8, "big")
-        h = hashlib.sha1()
-        h.update(m_bytes)
-        h.update(e_bytes)
-        kid = binascii.hexlify(h.digest())[:16].decode()
-        entry = KeyEntry(private_key=pk, kid=kid, expiry=expiry_epoch)
-        with self._lock:
-            self._keys.append(entry)
-        return entry
+    def generate_key(self, key_size=2048, expiry_epoch=None):
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+        public_key = private_key.public_key()
+        key = Key(private_key, public_key, expiry_epoch)
+        self.keys.append(key)
+        return key
 
-    def get_unexpired_public_keys(self, now: Optional[float] = None):
+    def get_unexpired_public_keys(self, now=None):
         if now is None:
             now = time.time()
-        with self._lock:
-            return [k for k in self._keys if k.expiry > now]
+        return [k for k in self.keys if k.expiry > now]
 
-    def get_newest_unexpired_key(self, now: Optional[float] = None) -> Optional[KeyEntry]:
-        if now is None:
-            now = time.time()
-        with self._lock:
-            for k in reversed(self._keys):
-                if k.expiry > now:
-                    return k
-        return None
-
-    def get_newest_expired_key(self, now: Optional[float] = None) -> Optional[KeyEntry]:
-        if now is None:
-            now = time.time()
-        with self._lock:
-            for k in reversed(self._keys):
-                if k.expiry <= now:
-                    return k
-        return None
-
-    def get_key_by_kid(self, kid: str) -> Optional[KeyEntry]:
-        with self._lock:
-            for k in self._keys:
-                if k.kid == kid:
-                    return k
-        return None
-
-    def export_public_pem(self, kid: str) -> Optional[bytes]:
-        k = self.get_key_by_kid(kid)
-        if not k:
+    def get_newest_unexpired_key(self, now=None):
+        keys = self.get_unexpired_public_keys(now)
+        if not keys:
             return None
-        pub = k.private_key.public_key()
-        return pub.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
+        return max(keys, key=lambda k: k.expiry)
+
+    def get_newest_expired_key(self, now=None):
+        if now is None:
+            now = time.time()
+        expired = [k for k in self.keys if k.expiry <= now]
+        if not expired:
+            return None
+        return max(expired, key=lambda k: k.expiry)
+
+    def get_key_by_kid(self, kid):
+        for k in self.keys:
+            if k.kid == kid:
+                return k
+        return None
