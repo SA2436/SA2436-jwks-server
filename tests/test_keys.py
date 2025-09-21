@@ -15,7 +15,6 @@ def test_generate_and_query():
     assert ks.get_newest_unexpired_key(now=now) is not None
     assert ks.get_newest_expired_key(now=now) is not None
 
-    # lookup by kid
     found = ks.get_key_by_kid(e1.kid)
     assert found is not None
     assert found.kid == e1.kid
