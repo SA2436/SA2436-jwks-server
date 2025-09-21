@@ -52,7 +52,7 @@ def jwks():
 def auth(expired: bool = False):
     key_to_use = expired_key if expired else active_key
     private_key = key_to_use["private_key"]
-    headers = {"kid": key_to_use["kid"]}
+    headers = {"kid": key_to_use["kid"]} # This must match JWKS
 
     payload = {
         "sub": "fake_user",
