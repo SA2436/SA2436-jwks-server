@@ -1,85 +1,64 @@
-# app/main.py
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from datetime import datetime, timedelta, timezone
-import time
-import jwt  # PyJWT
-from app.keys import KeyStore
-from app.jwk import rsa_public_to_jwk
-from typing import Dict
+import jwt
+from datetime import datetime, timedelta
+import uuid
+from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 
-app = FastAPI(title="JWKS Demo")
+app = FastAPI()
 
-# create datastore and pre-generate keys: one valid (24h) and one expired (2h ago)
-ks = KeyStore()
-ks.generate_key(bits=2048, expiry_epoch=time.time() + 24 * 3600)
-ks.generate_key(bits=2048, expiry_epoch=time.time() - 2 * 3600)
+# Generate RSA key pair
+def generate_rsa_key():
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key = private_key.public_key()
+    kid = str(uuid.uuid4())
+    expiry = datetime.utcnow() + timedelta(minutes=10)
 
-JWT_ISS = "jwks-python-demo"
-
-@app.get("/jwks")
-def jwks():
-    """
-    Return JWKS containing only **unexpired** public keys.
-    """
-    now = time.time()
-    unexpired = ks.get_unexpired_public_keys(now=now)
-    jwks = {"keys": []}
-    for e in unexpired:
-        pub_nums = e.public_numbers()
-        jwks["keys"].append(rsa_public_to_jwk(e.kid, pub_nums))
-    return JSONResponse(content=jwks)
-
-@app.post("/auth")
-def auth(request: Request):
-    """
-    Issue a signed JWT. If the query parameter `expired` is present (any value),
-    issue token signed with an expired key and set token exp == key.expiry (in the past).
-    """
-    # method POST enforced by decorator
-    params = dict(request.query_params)
-    use_expired = "expired" in params
-
-    now = time.time()
-    key_entry = None
-    if use_expired:
-        key_entry = ks.get_newest_expired_key(now=now)
-        if key_entry is None:
-            raise HTTPException(status_code=500, detail="no expired key available")
-    else:
-        key_entry = ks.get_newest_unexpired_key(now=now)
-        if key_entry is None:
-            raise HTTPException(status_code=500, detail="no unexpired key available")
-
-    # Build claims
-    iat = int(now)
-    if use_expired:
-        exp = int(key_entry.expiry)
-    else:
-        preferred_exp = now + 15 * 60  # 15 minutes
-        # ensure token doesn't outlive key
-        if preferred_exp > key_entry.expiry:
-            exp = int(key_entry.expiry)
-        else:
-            exp = int(preferred_exp)
-
-    payload = {
-        "iss": JWT_ISS,
-        "iat": iat,
-        "sub": "test-user",
-        "exp": exp,
+    return {
+        "kid": kid,
+        "expiry": expiry,
+        "private_key": private_key,
+        "public_key": public_key
     }
 
-    # prepare headers with kid
-    headers = {"kid": key_entry.kid, "alg": "RS256", "typ": "JWT"}
+# Hold active and expired keys
+active_key = generate_rsa_key()
+expired_key = generate_rsa_key()
+expired_key["expiry"] = datetime.utcnow() - timedelta(minutes=5)
 
-    # private key in PEM format for PyJWT
-    private_pem = key_entry.private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
-    )
+# JWKS endpoint
+@app.get("/.well-known/jwks.json")
+def jwks():
+    keys = []
+    now = datetime.utcnow()
+    for key in [active_key]:
+        if key["expiry"] > now:
+            public_numbers = key["public_key"].public_numbers()
+            e = public_numbers.e
+            n = public_numbers.n
+            keys.append({
+                "kty": "RSA",
+                "alg": "RS256",
+                "use": "sig",
+                "kid": key["kid"],
+                "n": jwt.utils.base64url_encode(n.to_bytes((n.bit_length() + 7) // 8, "big")).decode("utf-8"),
+                "e": jwt.utils.base64url_encode(e.to_bytes((e.bit_length() + 7) // 8, "big")).decode("utf-8")
+            })
+    return {"keys": keys}
 
-    token = jwt.encode(payload, private_pem, algorithm="RS256", headers=headers)
-    return {"token": token}
+# Auth endpoint
+@app.post("/auth")
+def auth(expired: bool = False):
+    key_to_use = expired_key if expired else active_key
+    private_key = key_to_use["private_key"]
+    headers = {"kid": key_to_use["kid"]}
+
+    payload = {
+        "sub": "fake_user",
+        "iat": datetime.utcnow(),
+        "exp": key_to_use["expiry"]
+    }
+
+    token = jwt.encode(payload, private_key, algorithm="RS256", headers=headers)
+    return JSONResponse(content={"token": token})
