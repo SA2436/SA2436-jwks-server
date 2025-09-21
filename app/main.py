@@ -7,7 +7,7 @@ import jwt  # PyJWT
 from app.keys import KeyStore
 from app.jwk import rsa_public_to_jwk
 from typing import Dict
-from cryptography.hazmat.primitives import serialization
+
 
 app = FastAPI(title="JWKS Demo")
 
